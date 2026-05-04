@@ -2,187 +2,381 @@
 using Sailyk;
 using Sailyk.Services;
 
-
 Console.OutputEncoding = Encoding.UTF8;
 
-const string LabelLayerName = "Blocklabel";
-const string BoundaryLayerName = "BLOCK_BOUNDARIES";
+// =====================
+// ВХОДНЫЕ ФАЙЛЫ
+// =====================
 
-const int ProjectSurfaceIndex = 37;
-const int FactSurfaceIndex = 1;
+const string DxfFileName = "blocks.dxf";
 
-const double GridStep = 5.0;
-const string BlockNameForMap = "C1-59";
-const double MapGridStep = 5.0;
+// Если обе поверхности в одном файле:
+const string CombinedLandXmlFileName = "surfaces.xml";
 
-//откосы
-const string SlopeBlockName = "C1-59";
-const double SlopeAngleThresholdDegrees = 10.0;
-const double SlopeGridStep = 5.0;
-//показать откосы
-const string SlopeMapBlockName = "C1-59";
-const double SlopeMapGridStep = 5.0;
+// Если поверхности в отдельных файлах:
+const string InitialSurfaceFileName = "Нач_БВР_Мега_блок.xml";
+const string FinalSurfaceFileName = "27 04 26_ур. Сайылык.xml";
 
+// =====================
+// НАЗВАНИЯ ПОВЕРХНОСТЕЙ
+// =====================
 
+const string InitialSurfaceName = "Нач_БВР_Мега_блок";
+const string FinalSurfaceName = "27 04 26_ур. Сайылык";
+
+// =====================
+// НАСТРОЙКИ РАСЧЁТА
+// =====================
+
+const double GridStep = 2.0;
+const double WorkedAreaThresholdAbs = 1.0;      // где считаем, что реально работали
+const double StrongChangeThresholdAbs = 5.0;    // граница сильного изменения для карты
+
+// =====================
+// СЛОИ DXF
+// =====================
+
+const string GeologicalLabelLayerName = "Geol_Block-C-TOPO";
+const string GeologicalBoundaryLayerName = "Geol_Block-C-TOPO";
+
+const string BlastLabelLayerName = "P_block-C-TOPO";
+const string BlastBoundaryLayerName = "P_block-C-TOPO";
+
+const string LocalAreaBoundaryLayerName = "uhodka-C-TOPO";
+
+// Зелёный производственный контур
+const string ProductionContourBoundaryLayerName = "Proiz_block-C-TOPO";
+
+// Фильтр по цвету пока не используем
+int? geologicalBoundaryColorIndex = null;
+int? blastBoundaryColorIndex = null;
+int? localAreaBoundaryColorIndex = null;
+int? productionContourBoundaryColorIndex = null;
 
 var dataDir = Path.Combine(AppContext.BaseDirectory, "Data");
-
-var dxfPath = Path.Combine(dataDir, "blocks.dxf");
-var projectPath = Path.Combine(dataDir, "project_surface.xml");
-var factPath = Path.Combine(dataDir, "fact_surface.xml");
+var dxfPath = Path.Combine(dataDir, DxfFileName);
 
 Console.WriteLine("=== ФАЙЛЫ ===");
-Console.WriteLine($"DXF:     {dxfPath}");
-Console.WriteLine($"Project: {projectPath}");
-Console.WriteLine($"Fact:    {factPath}");
+Console.WriteLine($"Data: {dataDir}");
+Console.WriteLine($"DXF:  {dxfPath}");
 Console.WriteLine();
 
 if (!File.Exists(dxfPath))
 {
-    Console.WriteLine("blocks.dxf НЕ НАЙДЕН");
+    Console.WriteLine($"Файл DXF не найден: {dxfPath}");
     return;
 }
 
-if (!File.Exists(projectPath))
+DxfBlockReader.PrintLayerDiagnostics(dxfPath);
+
+Console.WriteLine();
+Console.WriteLine("=== ЧТЕНИЕ ПОВЕРХНОСТЕЙ ===");
+
+TinSurface initialSurface;
+TinSurface finalSurface;
+
+try
 {
-    Console.WriteLine("project_surface.xml НЕ НАЙДЕН");
+    initialSurface = ReadSurfaceSmart(
+        dataDir,
+        CombinedLandXmlFileName,
+        InitialSurfaceFileName,
+        InitialSurfaceName);
+
+    finalSurface = ReadSurfaceSmart(
+        dataDir,
+        CombinedLandXmlFileName,
+        FinalSurfaceFileName,
+        FinalSurfaceName);
+}
+catch (Exception ex)
+{
+    Console.WriteLine("Ошибка чтения поверхностей:");
+    Console.WriteLine(ex.Message);
     return;
 }
 
-if (!File.Exists(factPath))
+PrintSurfaceInfo("ПЕРВОНАЧАЛЬНАЯ ПОВЕРХНОСТЬ", initialSurface);
+PrintSurfaceInfo("ВТОРИЧНАЯ ПОВЕРХНОСТЬ", finalSurface);
+
+Console.WriteLine();
+Console.WriteLine("Строим TIN-индексы...");
+var initialTin = new TinInterpolator(initialSurface);
+var finalTin = new TinInterpolator(finalSurface);
+
+Console.WriteLine();
+Console.WriteLine("=== ЧТЕНИЕ КОНТУРОВ DXF ===");
+
+var geologicalBlocks = DxfBlockReader.ReadLabeledBlocks(
+    dxfPath,
+    GeologicalLabelLayerName,
+    GeologicalBoundaryLayerName,
+    BlockLabelKind.Geological,
+    geologicalBoundaryColorIndex);
+
+var blastBlocks = DxfBlockReader.ReadLabeledBlocks(
+    dxfPath,
+    BlastLabelLayerName,
+    BlastBoundaryLayerName,
+    BlockLabelKind.Blast,
+    blastBoundaryColorIndex);
+
+var localAreas = DxfBlockReader.ReadUnlabeledClosedContours(
+    dxfPath,
+    LocalAreaBoundaryLayerName,
+    "Локальная площадь",
+    localAreaBoundaryColorIndex);
+
+var productionContours = DxfBlockReader.ReadUnlabeledClosedContours(
+    dxfPath,
+    ProductionContourBoundaryLayerName,
+    "Производственный контур",
+    productionContourBoundaryColorIndex);
+
+PrintBlockSet("Геологические блоки", geologicalBlocks);
+PrintBlockSet("Взрывные блоки", blastBlocks);
+PrintBlockSet("Локальные площади", localAreas);
+PrintBlockSet("Производственный контур", productionContours);
+
+if (productionContours.Count == 0)
 {
-    Console.WriteLine("fact_surface.xml НЕ НАЙДЕН");
+    Console.WriteLine();
+    Console.WriteLine("ОШИБКА: производственный контур не найден.");
+    Console.WriteLine($"Проверь слой: {ProductionContourBoundaryLayerName}");
     return;
 }
 
-Console.WriteLine("Читаем DXF...");
-var blocks = DxfBlockReader.ReadBlocks(dxfPath, LabelLayerName, BoundaryLayerName);
-
-Console.WriteLine($"Найдено блоков с контурами: {blocks.Count}");
-foreach (var block in blocks)
+if (productionContours.Count > 1)
 {
-    Console.WriteLine($"{block.Name}: площадь контура {block.Contour.Area:F0} м², вершин {block.Contour.Points.Count}");
-}
-
-Console.WriteLine();
-Console.WriteLine("Читаем поверхности LandXML...");
-
-var projectSurface = LandXmlSurfaceReader.ReadSurfaceByIndex(projectPath, ProjectSurfaceIndex);
-var factSurface = LandXmlSurfaceReader.ReadSurfaceByIndex(factPath, FactSurfaceIndex);
-
-PrintSurfaceInfo("ПРОЕКТ", projectSurface);
-PrintSurfaceInfo("ФАКТ", factSurface);
-
-Console.WriteLine();
-Console.WriteLine("Строим индексы TIN...");
-var projectTin = new TinInterpolator(projectSurface);
-var factTin = new TinInterpolator(factSurface);
-
-var slopeMapBlock = blocks
-    .FirstOrDefault(b => string.Equals(b.Name, SlopeMapBlockName, StringComparison.OrdinalIgnoreCase));
-
-if (slopeMapBlock is not null)
-{
-    var slopeSvgPath = Path.Combine(dataDir, $"block_{slopeMapBlock.Name}_slopes.svg");
-
-    SlopeVisualizer.ExportSlopeMapSvg(
-        slopeMapBlock,
-        projectTin,
-        SlopeMapGridStep,
-        SlopeAngleThresholdDegrees,
-        slopeSvgPath
-    );
-
     Console.WriteLine();
-    Console.WriteLine($"Карта откосов блока {slopeMapBlock.Name} сохранена:");
-    Console.WriteLine(slopeSvgPath);
-}
-else
-{
-    Console.WriteLine($"Блок {SlopeMapBlockName} для карты откосов не найден.");
+    Console.WriteLine($"ПРЕДУПРЕЖДЕНИЕ: найдено производственных контуров: {productionContours.Count}");
+    Console.WriteLine("Расчёт будет выполнен внутри всех найденных производственных контуров.");
 }
 
-
-Console.WriteLine();
-Console.WriteLine("=== РАСЧЁТ ПО БЛОКАМ ===");
-Console.WriteLine($"Шаг сетки: {GridStep} м");
-Console.WriteLine();
-
-foreach (var block in blocks.OrderBy(b => b.Name))
+if (geologicalBlocks.Count == 0)
 {
-    var result = BlockAnalyzer.AnalyzeBlock(
-        block,
-        projectTin,
-        factTin,
-        GridStep
-    );
-
-    PrintBlockResult(block, result);
-}
-
-var slopeBlock = blocks
-    .FirstOrDefault(b => string.Equals(b.Name, SlopeBlockName, StringComparison.OrdinalIgnoreCase));
-
-if (slopeBlock is not null)
-{
-    var slopeResult = SlopeAnalyzer.AnalyzeSlopes(
-        slopeBlock,
-        projectTin,
-        factTin,
-        SlopeGridStep,
-        SlopeAngleThresholdDegrees
-    );
-
     Console.WriteLine();
-    Console.WriteLine($"=== ОТКОСЫ ПО БЛОКУ {slopeBlock.Name} ===");
-    Console.WriteLine($"Порог уклона: {SlopeAngleThresholdDegrees:F1}°");
-    Console.WriteLine($"Шаг сетки: {SlopeGridStep:F1} м");
-    Console.WriteLine($"Точек внутри блока: {slopeResult.PointsInsideBlock}");
-    Console.WriteLine($"Точек откоса: {slopeResult.SlopePoints}");
-    Console.WriteLine($"Площадь откосов в плане: {slopeResult.SlopePlanArea:F0} м²");
-    Console.WriteLine($"Приближённая площадь поверхности откосов: {slopeResult.SlopeSurfaceArea:F0} м²");
-    Console.WriteLine($"Средний уклон откосов: {slopeResult.AverageSlopeAngle:F2}°");
-    Console.WriteLine($"Среднее dZ на откосах: {slopeResult.AverageDz:F3} м");
-    Console.WriteLine($"Факт выше проекта на откосах: {slopeResult.PositiveVolume:F0} м³");
-    Console.WriteLine($"Факт ниже проекта на откосах: {slopeResult.NegativeVolume:F0} м³");
-    Console.WriteLine($"Баланс по откосам: {slopeResult.TotalVolume:F0} м³");
-}
-else
-{
-    Console.WriteLine($"Блок {SlopeBlockName} для анализа откосов не найден.");
+    Console.WriteLine("ПРЕДУПРЕЖДЕНИЕ: геологические блоки не найдены.");
+    Console.WriteLine($"Проверь слой: {GeologicalBoundaryLayerName}");
 }
 
-
-
-var blockForMap = blocks
-    .FirstOrDefault(b => string.Equals(b.Name, BlockNameForMap, StringComparison.OrdinalIgnoreCase));
-
-if (blockForMap is not null)
+if (blastBlocks.Count == 0)
 {
-    var svgPath = Path.Combine(dataDir, $"block_{blockForMap.Name}_dz_map.svg");
-
-    BlockVisualizer.ExportDzMapSvg(
-        blockForMap,
-        projectTin,
-        factTin,
-        MapGridStep,
-        svgPath
-    );
-
     Console.WriteLine();
-    Console.WriteLine($"SVG-карта блока {blockForMap.Name} сохранена:");
-    Console.WriteLine(svgPath);
+    Console.WriteLine("ПРЕДУПРЕЖДЕНИЕ: взрывные блоки не найдены.");
+    Console.WriteLine($"Проверь слой: {BlastBoundaryLayerName}");
 }
-else
+
+if (localAreas.Count == 0)
 {
-    Console.WriteLine($"Блок {BlockNameForMap} для карты не найден.");
+    Console.WriteLine();
+    Console.WriteLine("ПРЕДУПРЕЖДЕНИЕ: локальные площади не найдены.");
+    Console.WriteLine($"Проверь слой: {LocalAreaBoundaryLayerName}");
 }
 
 Console.WriteLine();
-Console.WriteLine("Пояснение:");
-Console.WriteLine("dZ = Zфакт - Zпроект");
-Console.WriteLine("dZ > 0: факт выше проекта. Для выемки это обычно недоработка.");
-Console.WriteLine("dZ < 0: факт ниже проекта. Для выемки это обычно переработка.");
+Console.WriteLine("=== РАСЧЁТ ОБЪЁМА ВСКРЫШИ ===");
+Console.WriteLine($"Шаг сетки: {GridStep:F2} м");
+Console.WriteLine("Расчётная область: внутри зелёного производственного контура.");
+Console.WriteLine("Формула: объём вскрыши = Z первоначальной поверхности - Z вторичной поверхности");
+Console.WriteLine("Если значение положительное — поверхность стала ниже, значит объём снят.");
+Console.WriteLine("Если значение отрицательное — вторичная поверхность выше первоначальной.");
+Console.WriteLine();
+
+var noLocalCells = new List<DebugGridCell>();
+
+var results = VolumeBreakdownAnalyzer.Analyze(
+    geologicalBlocks,
+    blastBlocks,
+    localAreas,
+    productionContours,
+    initialTin,
+    finalTin,
+    GridStep,
+    cell => noLocalCells.Add(cell));
+
+var surfaceChangeCells = SurfaceChangeVisualizer.CollectCells(
+    geologicalBlocks,
+    blastBlocks,
+    localAreas,
+    productionContours,
+    initialTin,
+    finalTin,
+    GridStep);
+
+if (results.Count == 0)
+{
+    Console.WriteLine("Нет расчётных точек, где одновременно есть обе поверхности внутри производственного контура.");
+    return;
+}
+
+var detailedPath = Path.Combine(dataDir, "volume_breakdown_detailed.csv");
+var geoPath = Path.Combine(dataDir, "volume_by_geological_block.csv");
+var blastPath = Path.Combine(dataDir, "volume_by_blast_block.csv");
+var localPath = Path.Combine(dataDir, "volume_by_local_area.csv");
+var productionPath = Path.Combine(dataDir, "volume_by_production_contour.csv");
+
+var surfaceChangeCellsPath = Path.Combine(dataDir, "surface_change_cells.csv");
+var surfaceChangeSummaryPath = Path.Combine(dataDir, "surface_change_summary.csv");
+var globalSurfaceChangeMapPath = Path.Combine(dataDir, "global_surface_change_map.html");
+var workedAreaMapPath = Path.Combine(dataDir, "worked_area_map.html");
+
+var noLocalPointsPath = Path.Combine(dataDir, "debug_no_local_area_points.csv");
+var noLocalSummaryPath = Path.Combine(dataDir, "debug_no_local_area_by_geo_blast.csv");
+var noLocalMapPath = Path.Combine(dataDir, "debug_no_local_area_map.html");
+
+CsvReportWriter.WriteDetailed(detailedPath, results);
+
+CsvReportWriter.WriteSummary(
+    geoPath,
+    BuildSummary(results, r => r.Key.GeologicalBlock),
+    "Геологический блок");
+
+CsvReportWriter.WriteSummary(
+    blastPath,
+    BuildSummary(results, r => r.Key.BlastBlock),
+    "Взрывной блок");
+
+CsvReportWriter.WriteSummary(
+    localPath,
+    BuildSummary(results, r => r.Key.LocalArea),
+    "Локальная площадь");
+
+CsvReportWriter.WriteSummary(
+    productionPath,
+    new List<VolumeSummaryRow>
+    {
+        new(
+            GroupName: "Производственный контур",
+            Area: results.Sum(x => x.Area),
+            ExcavationVolume: results.Sum(x => x.ExcavationVolume),
+            FillOrErrorVolume: results.Sum(x => x.FillOrErrorVolume),
+            NetVolume: results.Sum(x => x.NetVolume))
+    },
+    "Производственный контур");
+
+DebugMapWriter.WriteNoLocalAreaPointsCsv(noLocalPointsPath, noLocalCells);
+DebugMapWriter.WriteNoLocalAreaSummaryCsv(noLocalSummaryPath, noLocalCells);
+DebugMapWriter.WriteNoLocalAreaMapHtml(
+    noLocalMapPath,
+    productionContours,
+    geologicalBlocks,
+    blastBlocks,
+    localAreas,
+    noLocalCells);
+
+
+SurfaceChangeVisualizer.WriteCellsCsv(surfaceChangeCellsPath, surfaceChangeCells);
+
+SurfaceChangeVisualizer.WriteCategorySummaryCsv(
+    surfaceChangeSummaryPath,
+    surfaceChangeCells,
+    WorkedAreaThresholdAbs,
+    StrongChangeThresholdAbs);
+
+SurfaceChangeVisualizer.WriteGlobalChangeMapHtml(
+    globalSurfaceChangeMapPath,
+    productionContours,
+    geologicalBlocks,
+    blastBlocks,
+    localAreas,
+    surfaceChangeCells,
+    WorkedAreaThresholdAbs,
+    StrongChangeThresholdAbs);
+
+SurfaceChangeVisualizer.WriteWorkedAreaMapHtml(
+    workedAreaMapPath,
+    productionContours,
+    geologicalBlocks,
+    blastBlocks,
+    localAreas,
+    surfaceChangeCells,
+    WorkedAreaThresholdAbs);
+
+
+PrintSummary("ИТОГО ПО ГЕОЛОГИЧЕСКИМ БЛОКАМ", BuildSummary(results, r => r.Key.GeologicalBlock));
+PrintSummary("ИТОГО ПО ВЗРЫВНЫМ БЛОКАМ", BuildSummary(results, r => r.Key.BlastBlock));
+PrintSummary("ИТОГО ПО ЛОКАЛЬНЫМ ПЛОЩАДЯМ", BuildSummary(results, r => r.Key.LocalArea));
+
+PrintSummary(
+    "ИТОГО ПО ПРОИЗВОДСТВЕННОМУ КОНТУРУ",
+    new List<VolumeSummaryRow>
+    {
+        new(
+            GroupName: "Производственный контур",
+            Area: results.Sum(x => x.Area),
+            ExcavationVolume: results.Sum(x => x.ExcavationVolume),
+            FillOrErrorVolume: results.Sum(x => x.FillOrErrorVolume),
+            NetVolume: results.Sum(x => x.NetVolume))
+    });
+
+Console.WriteLine();
+Console.WriteLine("=== ОТЛАДКА: БЕЗ ЛОКАЛЬНОЙ ПЛОЩАДИ ===");
+Console.WriteLine($"Точек сетки: {noLocalCells.Count}");
+Console.WriteLine($"Площадь: {noLocalCells.Sum(x => x.CellSize * x.CellSize):F0} м²");
+Console.WriteLine($"Баланс: {noLocalCells.Sum(x => x.Volume):F0} м³");
+
+Console.WriteLine();
+Console.WriteLine("=== CSV И HTML ФАЙЛЫ СОХРАНЕНЫ ===");
+Console.WriteLine(detailedPath);
+Console.WriteLine(geoPath);
+Console.WriteLine(blastPath);
+Console.WriteLine(localPath);
+Console.WriteLine(productionPath);
+Console.WriteLine(noLocalPointsPath);
+Console.WriteLine(noLocalSummaryPath);
+Console.WriteLine(noLocalMapPath);
+Console.WriteLine(surfaceChangeCellsPath);
+Console.WriteLine(surfaceChangeSummaryPath);
+Console.WriteLine(globalSurfaceChangeMapPath);
+Console.WriteLine(workedAreaMapPath);
+
+
+static TinSurface ReadSurfaceSmart(
+    string dataDir,
+    string combinedLandXmlFileName,
+    string separateSurfaceFileName,
+    string surfaceName)
+{
+    var combinedPath = Path.Combine(dataDir, combinedLandXmlFileName);
+
+    if (File.Exists(combinedPath))
+    {
+        Console.WriteLine($"Ищем поверхность '{surfaceName}' в общем файле:");
+        Console.WriteLine(combinedPath);
+
+        return LandXmlSurfaceReader.ReadSurfaceByName(combinedPath, surfaceName);
+    }
+
+    var separatePath = Path.Combine(dataDir, separateSurfaceFileName);
+
+    if (!File.Exists(separatePath))
+    {
+        throw new FileNotFoundException(
+            $"Не найден ни общий файл {combinedPath}, ни отдельный файл {separatePath}");
+    }
+
+    Console.WriteLine($"Читаем отдельный файл поверхности:");
+    Console.WriteLine(separatePath);
+
+    var surfaceNames = LandXmlSurfaceReader.ListSurfaceNames(separatePath);
+
+    if (surfaceNames.Any(x => string.Equals(
+            x.Trim(),
+            surfaceName.Trim(),
+            StringComparison.OrdinalIgnoreCase)))
+    {
+        return LandXmlSurfaceReader.ReadSurfaceByName(separatePath, surfaceName);
+    }
+
+    if (surfaceNames.Count == 1)
+    {
+        Console.WriteLine($"В файле одна поверхность: '{surfaceNames[0]}'. Берём её.");
+        return LandXmlSurfaceReader.ReadFirstSurface(separatePath);
+    }
+
+    return LandXmlSurfaceReader.ReadSurfaceByName(separatePath, surfaceName);
+}
 
 static void PrintSurfaceInfo(string title, TinSurface surface)
 {
@@ -196,34 +390,46 @@ static void PrintSurfaceInfo(string title, TinSurface surface)
     Console.WriteLine($"Z: {surface.MinZ:F3} ... {surface.MaxZ:F3}");
 }
 
-static void PrintBlockResult(WorkBlock block, BlockAnalysisResult result)
+static void PrintBlockSet(string title, IReadOnlyList<WorkBlock> blocks)
 {
-    Console.WriteLine($"Блок {block.Name}");
-    Console.WriteLine($"  Площадь контура DXF: {block.Contour.Area:F0} м²");
-    Console.WriteLine($"  Точек сетки внутри контура: {result.PointsInsideContour}");
-    Console.WriteLine($"  Точек с проектом и фактом: {result.ValidPoints}");
-
-    if (result.ValidPoints == 0)
-    {
-        Console.WriteLine("  Нет точек, где одновременно есть проектная и фактическая поверхность.");
-        Console.WriteLine();
-        return;
-    }
-
-    Console.WriteLine($"  Расчётная площадь по сетке: {result.CalculatedArea:F0} м²");
-    Console.WriteLine($"  Среднее dZ: {result.AverageDz:F3} м");
-    Console.WriteLine($"  Min dZ: {result.MinDz:F3} м");
-    Console.WriteLine($"  Max dZ: {result.MaxDz:F3} м");
-    Console.WriteLine($"  Факт выше проекта: {result.PositiveVolume:F0} м³");
-    Console.WriteLine($"  Факт ниже проекта: {result.NegativeVolume:F0} м³");
-    Console.WriteLine($"  Баланс: {result.TotalVolume:F0} м³");
-
-    if (result.PositiveVolume > Math.Abs(result.NegativeVolume))
-        Console.WriteLine("  Предварительно: больше недоработки, факт выше проекта.");
-    else if (Math.Abs(result.NegativeVolume) > result.PositiveVolume)
-        Console.WriteLine("  Предварительно: больше переработки, факт ниже проекта.");
-    else
-        Console.WriteLine("  Предварительно: баланс близок к нулю.");
-
     Console.WriteLine();
+    Console.WriteLine($"=== {title} ===");
+    Console.WriteLine($"Количество: {blocks.Count}");
+
+    foreach (var block in blocks.OrderBy(x => x.Name))
+    {
+        Console.WriteLine($"{block.Name}: площадь {block.Contour.Area:F0} м², слой {block.Contour.Layer}");
+    }
+}
+
+static List<VolumeSummaryRow> BuildSummary(
+    IEnumerable<VolumeBreakdownResult> results,
+    Func<VolumeBreakdownResult, string> groupSelector)
+{
+    return results
+        .GroupBy(groupSelector)
+        .Select(g => new VolumeSummaryRow(
+            GroupName: g.Key,
+            Area: g.Sum(x => x.Area),
+            ExcavationVolume: g.Sum(x => x.ExcavationVolume),
+            FillOrErrorVolume: g.Sum(x => x.FillOrErrorVolume),
+            NetVolume: g.Sum(x => x.NetVolume)))
+        .OrderBy(x => x.GroupName, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+}
+
+static void PrintSummary(string title, IReadOnlyList<VolumeSummaryRow> rows)
+{
+    Console.WriteLine();
+    Console.WriteLine($"=== {title} ===");
+
+    foreach (var row in rows)
+    {
+        Console.WriteLine(
+            $"{row.GroupName}: " +
+            $"площадь {row.Area:F0} м²; " +
+            $"вскрыша {row.ExcavationVolume:F0} м³; " +
+            $"отрицательный объём {row.FillOrErrorVolume:F0} м³; " +
+            $"баланс {row.NetVolume:F0} м³");
+    }
 }
