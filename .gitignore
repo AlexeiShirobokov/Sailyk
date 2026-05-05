@@ -8,3 +8,8 @@ obj/
 
 Data/*.xml
 Data/*.dxf
+bin/
+obj/
+**/bin/
+**/obj/
+.idea/
